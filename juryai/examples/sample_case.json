@@ -1,0 +1,45 @@
+{
+  "case_id": "LOAN-2024-8891",
+  "applicant": {
+    "name": "Jane A. Doe",
+    "national_id": "AB-1234567",
+    "email": "jane.doe@example.com",
+    "phone": "+1-555-0142",
+    "postal_code": "10118",
+    "region": "NE"
+  },
+  "financials": {
+    "annual_income": 52000,
+    "existing_debt": 24000,
+    "requested_amount": 21000,
+    "credit_score": 631
+  },
+  "evidence": [
+    {
+      "id": "EV-001",
+      "category": "financial_record",
+      "text": "Bank statements for Jane A. Doe show 14 months of steady payroll deposits."
+    },
+    {
+      "id": "EV-002",
+      "category": "source_document",
+      "text": "Employer letter confirms full-time employment for 5 years and stable income."
+    },
+    {
+      "id": "EV-003",
+      "category": "operational_record",
+      "text": "No missed payments recorded on existing revolving accounts in 24 months."
+    }
+  ],
+  "claims": [
+    {
+      "id": "CL-1",
+      "category": "application_claim",
+      "text": "Applicant reports stable full-time employment for 5 years."
+    }
+  ],
+  "metadata": {
+    "channel": "web",
+    "risk_tier": "high"
+  }
+}
