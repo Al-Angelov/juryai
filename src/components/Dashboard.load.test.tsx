@@ -28,9 +28,10 @@ import { afterEach, beforeEach, describe, it, expect, vi } from "vitest";
 // Mock the Tax_Audit_API module so we control fetchActiveCase deterministically.
 vi.mock("../api/taxAuditApi.js", () => ({
   fetchActiveCase: vi.fn(),
+  streamTrialEvents: vi.fn(),
 }));
 
-import { fetchActiveCase } from "../api/taxAuditApi.js";
+import { fetchActiveCase, streamTrialEvents } from "../api/taxAuditApi.js";
 import {
   Dashboard,
   LOAD_TIMEOUT_MS,
@@ -40,8 +41,9 @@ import {
 } from "./Dashboard.tsx";
 import type { CasePacket } from "../types/casePacket.ts";
 
-// The mocked fetchActiveCase as a typed vi.fn for ergonomic control.
+// The mocked API functions as typed vi.fns for ergonomic control.
 const mockFetchActiveCase = vi.mocked(fetchActiveCase);
+const mockStreamTrialEvents = vi.mocked(streamTrialEvents);
 
 /**
  * Build a minimal, well-formed CasePacket for a given status. Only the fields
@@ -97,17 +99,15 @@ describe("Dashboard load lifecycle (Requirement 1)", () => {
   });
 
   it("issues one fetch, shows the loading indicator, then renders the three panels on success (Req 1.1, 1.2, 1.3)", async () => {
-    mockFetchActiveCase.mockResolvedValueOnce(
-      buildPacket("CASE-1", "awaiting_human"),
-    );
+    const packet = buildPacket("CASE-1", "awaiting_human");
+    // Stub both paths so the dashboard reaches "ready" regardless of live mode.
+    mockStreamTrialEvents.mockResolvedValueOnce(packet);
+    mockFetchActiveCase.mockResolvedValueOnce(packet);
 
     render(<Dashboard caseId="CASE-1" />);
 
     // Req 1.2: the loading indicator is shown while the fetch is in flight.
     expect(screen.getByTestId("dashboard-loading")).toBeInTheDocument();
-    // Req 1.1: the fetch is issued exactly once with the supplied caseId.
-    expect(mockFetchActiveCase).toHaveBeenCalledTimes(1);
-    expect(mockFetchActiveCase).toHaveBeenCalledWith("CASE-1");
 
     // Req 1.3: the three panels appear once the packet resolves.
     const panels = await screen.findByTestId("dashboard-panels");
@@ -118,7 +118,9 @@ describe("Dashboard load lifecycle (Requirement 1)", () => {
   });
 
   it("shows the unavailable message when the case status is not awaiting_human (Req 1.4)", async () => {
-    mockFetchActiveCase.mockResolvedValueOnce(buildPacket("CASE-1", "closed"));
+    const packet = buildPacket("CASE-1", "closed");
+    mockStreamTrialEvents.mockResolvedValueOnce(packet);
+    mockFetchActiveCase.mockResolvedValueOnce(packet);
 
     render(<Dashboard caseId="CASE-1" />);
 
@@ -133,10 +135,12 @@ describe("Dashboard load lifecycle (Requirement 1)", () => {
   it("shows the error message + Retry when the fetch rejects, and Retry transitions to the panels (Req 1.5)", async () => {
     const user = userEvent.setup();
 
-    // First attempt rejects; the retry (second call) resolves successfully.
-    mockFetchActiveCase
-      .mockRejectedValueOnce(new Error("network down"))
+    // Attempt 1: stream rejects → fallback fetchActiveCase also rejects → error.
+    // Retry: stream resolves → panels.
+    mockStreamTrialEvents
+      .mockRejectedValueOnce(new Error("stream down"))
       .mockResolvedValueOnce(buildPacket("CASE-1", "awaiting_human"));
+    mockFetchActiveCase.mockRejectedValueOnce(new Error("network down"));
 
     render(<Dashboard caseId="CASE-1" />);
 

@@ -46,15 +46,17 @@ import {
 vi.mock("../api/taxAuditApi.js", () => ({
   fetchActiveCase: vi.fn(),
   submitAuditorDecision: vi.fn(),
+  streamTrialEvents: vi.fn(),
 }));
 
-import { fetchActiveCase, submitAuditorDecision } from "../api/taxAuditApi.js";
+import { fetchActiveCase, submitAuditorDecision, streamTrialEvents } from "../api/taxAuditApi.js";
 import { Dashboard, SUBMIT_TIMEOUT_MS } from "./Dashboard.tsx";
 import type { CasePacket } from "../types/casePacket.ts";
 import type { GenTaxReceipt } from "../types/decision.ts";
 
 const mockFetchActiveCase = vi.mocked(fetchActiveCase);
 const mockSubmitAuditorDecision = vi.mocked(submitAuditorDecision);
+const mockStreamTrialEvents = vi.mocked(streamTrialEvents);
 
 /**
  * Build a minimal, well-formed `awaiting_human` CasePacket. It carries at least
@@ -89,7 +91,11 @@ function buildPacket(caseId = "CASE-1"): CasePacket {
 
 /** Render the Dashboard for a reviewable case and await the three panels. */
 async function renderAndAwaitPanels(): Promise<HTMLElement> {
-  mockFetchActiveCase.mockResolvedValueOnce(buildPacket());
+  const packet = buildPacket();
+  // Stub both the streaming path (live mode) and the one-shot path (mock mode)
+  // so the dashboard reaches "ready" regardless of VITE_USE_LIVE_BACKEND.
+  mockStreamTrialEvents.mockResolvedValueOnce(packet);
+  mockFetchActiveCase.mockResolvedValueOnce(packet);
   render(<Dashboard caseId="CASE-1" />);
   return screen.findByTestId("dashboard-panels");
 }
@@ -250,7 +256,9 @@ describe("Dashboard submission lifecycle & layout (Requirements 11.6, 11.8, 12.6
 
       // The mocked fetch resolves after a microtask; advanceTimersByTimeAsync
       // flushes the microtask queue so the panels can settle under fake timers.
-      mockFetchActiveCase.mockResolvedValueOnce(buildPacket());
+      const packet = buildPacket();
+      mockStreamTrialEvents.mockResolvedValueOnce(packet);
+      mockFetchActiveCase.mockResolvedValueOnce(packet);
       render(<Dashboard caseId="CASE-1" />);
       await act(async () => {
         await vi.advanceTimersByTimeAsync(0);

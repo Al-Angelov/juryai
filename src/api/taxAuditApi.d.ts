@@ -30,3 +30,21 @@ export function submitAuditorDecision(
   caseId: string,
   payload: unknown,
 ): Promise<GenTaxReceipt>;
+
+/**
+ * Stream a full JuryAI trial, calling `onEvent` for each NDJSON event as it
+ * arrives. Resolves to a mapped CasePacket derived from the terminal
+ * `trial.awaiting_human` event once the stream is exhausted.
+ *
+ * Only active when `VITE_USE_LIVE_BACKEND === "true"`. Throws on network
+ * failure so callers can fall back to `fetchActiveCase`.
+ *
+ * @param caseId   The case identifier to trial-run.
+ * @param onEvent  Callback invoked for every parsed NDJSON event.
+ * @param signal   Optional AbortSignal to cancel the in-flight stream.
+ */
+export function streamTrialEvents(
+  caseId: string,
+  onEvent: (event: { type: string; data?: Record<string, unknown> }) => void,
+  signal?: AbortSignal,
+): Promise<CasePacket>;

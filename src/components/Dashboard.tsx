@@ -23,8 +23,13 @@
 // _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 1.6_
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { fetchActiveCase, submitAuditorDecision } from "../api/taxAuditApi.js";
+import {
+  fetchActiveCase,
+  streamTrialEvents,
+  submitAuditorDecision,
+} from "../api/taxAuditApi.js";
 import type { CasePacket } from "../types/casePacket.ts";
+import type { AgentLogEntry } from "../types/casePacket.ts";
 import type { AuditorDecision, GenTaxReceipt } from "../types/decision.ts";
 import { THEME_TOKENS } from "../lib/theme.ts";
 import { ErrorPanel, LoadingIndicator, cn } from "./ui";
@@ -125,6 +130,67 @@ function isPresentCaseId(caseId: string | undefined): caseId is string {
   return typeof caseId === "string" && caseId.length > 0;
 }
 
+// ---------------------------------------------------------------------------
+// Live-mode flag (Vite env var; undefined / false in Vitest → mock path only).
+// ---------------------------------------------------------------------------
+
+/** True when the app is running with VITE_USE_LIVE_BACKEND=true. */
+const USE_LIVE_BACKEND =
+  typeof import.meta !== "undefined" &&
+  (import.meta as unknown as Record<string, unknown>).env !== undefined &&
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (import.meta as any).env?.VITE_USE_LIVE_BACKEND === "true";
+
+/**
+ * Convert a raw NDJSON event from the JuryAI trial stream into an
+ * `AgentLogEntry` that the `AgentTransparencyTree` timeline can render.
+ * Returns `null` for event types that don't correspond to an agent step.
+ */
+function eventToAgentEntry(event: {
+  type: string;
+  data?: Record<string, unknown>;
+}): AgentLogEntry | null {
+  const agentNameMap: Record<string, AgentLogEntry["agent"]> = {
+    DecisionWitnessAgent: "Ingestion_Agent",
+    FactCheckerAgent: "Reasoner_Agent",
+    BiasPrivacyChallengerAgent: "Critic_Agent",
+  };
+
+  if (event.type === "agent.completed") {
+    const d = event.data || {};
+    const backendName = String(d.agent || "");
+    const frontendName = agentNameMap[backendName] ?? "Court_Clerk";
+    return {
+      agent: frontendName,
+      systemPrompt: d.role
+        ? `Role: ${d.role}. Verdict: ${d.verdict ?? "—"} @ ${Math.round(Number(d.confidence ?? 0) * 100)}% confidence.`
+        : undefined,
+      contextContract: Array.isArray(d.evidence_ids) && d.evidence_ids.length
+        ? `Evidence IDs: ${(d.evidence_ids as string[]).join(", ")}`
+        : undefined,
+      reasoningOutput: [
+        d.rationale,
+        Array.isArray(d.flags) && d.flags.length
+          ? `Flags: ${(d.flags as string[]).join(", ")}`
+          : null,
+      ]
+        .filter(Boolean)
+        .join(" | ") || undefined,
+    };
+  }
+
+  if (event.type === "clerk.compiled") {
+    return {
+      agent: "Court_Clerk",
+      systemPrompt: "Deterministic CasePacket assembly — no LLM.",
+      contextContract: "Inputs: all witness findings + firewall audit + counterfactual result.",
+      reasoningOutput: `Compiled. Risk level: ${event.data?.risk_level ?? "—"}.`,
+    };
+  }
+
+  return null;
+}
+
 /**
  * Dashboard — reads a `caseId` prop and drives the case-load / retry state
  * machine, rendering the three review panels once a reviewable case is loaded.
@@ -137,6 +203,12 @@ export function Dashboard({ caseId }: DashboardProps) {
   );
   const [packet, setPacket] = useState<CasePacket | null>(null);
 
+  // Progressive streaming state: agent entries that arrive in real-time while
+  // a live-mode trial is in flight. The AgentTransparencyTree panel renders
+  // these immediately as they arrive, animating the pipeline visually.
+  // In mock mode this stays empty and the panel uses packet.agentDebate instead.
+  const [streamEvents, setStreamEvents] = useState<AgentLogEntry[]>([]);
+
   // A monotonically increasing token identifying the current load attempt.
   // Incrementing it invalidates any in-flight load (unmount, caseId change, or
   // a retry), so a stale resolution — including the promise that lost the
@@ -148,7 +220,67 @@ export function Dashboard({ caseId }: DashboardProps) {
     const token = ++loadTokenRef.current;
     setState("loading");
     setPacket(null);
+    setStreamEvents([]); // reset progressive stream on each new load
 
+    // ------------------------------------------------------------------
+    // Live streaming path (VITE_USE_LIVE_BACKEND=true only).
+    // Uses streamTrialEvents() so agent nodes animate in Panel 2 in
+    // real-time as each event arrives from the backend.
+    // Falls back to the mock path on any failure.
+    // ------------------------------------------------------------------
+    if (USE_LIVE_BACKEND) {
+      const abortController = new AbortController();
+
+      const onEvent = (evt: { type: string; data?: Record<string, unknown> }) => {
+        if (token !== loadTokenRef.current) return; // stale load — ignore
+        const entry = eventToAgentEntry(evt);
+        if (entry) {
+          setStreamEvents((prev) => [...prev, entry]);
+        }
+      };
+
+      streamTrialEvents(id, onEvent, abortController.signal)
+        .then((mapped: CasePacket) => {
+          if (token !== loadTokenRef.current) return;
+          if (mapped.status === REVIEWABLE_STATUS) {
+            setPacket(mapped);
+            setState("ready");
+          } else {
+            setState("unavailable");
+          }
+        })
+        .catch(() => {
+          if (token !== loadTokenRef.current) return;
+          // Live stream failed — fall back to the mock-or-live fetchActiveCase
+          // which has its own built-in fallback chain.
+          fetchActiveCase(id)
+            .then((loaded: CasePacket) => {
+              if (token !== loadTokenRef.current) return;
+              if (loaded.status === REVIEWABLE_STATUS) {
+                setStreamEvents([]); // clear partial stream; packet has full data
+                setPacket(loaded);
+                setState("ready");
+              } else {
+                setState("unavailable");
+              }
+            })
+            .catch(() => {
+              if (token !== loadTokenRef.current) return;
+              setState("error");
+            });
+        });
+
+      // Cleanup: abort the in-flight stream when the token changes (caseId
+      // change, unmount, or retry) so we don't apply stale results.
+      return () => {
+        abortController.abort();
+      };
+    }
+
+    // ------------------------------------------------------------------
+    // Mock / default path — unchanged; exercises the same code path that
+    // all existing tests cover. No streaming, no AbortController.
+    // ------------------------------------------------------------------
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
     const timeout = new Promise<typeof TIMEOUT_SENTINEL>((resolve) => {
       timeoutId = setTimeout(() => resolve(TIMEOUT_SENTINEL), LOAD_TIMEOUT_MS);
@@ -290,6 +422,31 @@ export function Dashboard({ caseId }: DashboardProps) {
   }
 
   if (state === "loading") {
+    // In live streaming mode, once events start arriving we render the full
+    // three-panel grid immediately so the agent timeline animates in real-time.
+    // In mock mode (or before the first event) we show the standard spinner.
+    if (USE_LIVE_BACKEND && streamEvents.length > 0) {
+      return (
+        <div className={shellClass} data-testid="dashboard">
+          <div
+            className="grid grid-cols-1 gap-8 p-8 lg:grid-cols-[25%_50%_25%]"
+            data-testid="dashboard-panels"
+            data-submit-state="idle"
+            aria-busy="true"
+          >
+            {/* Panel 1: empty skeleton while streaming */}
+            <CaseContextPanel subject={{}} documents={[]} />
+            {/* Panel 2: live agent events animate in as they arrive */}
+            <AgentTransparencyTree agentDebate={streamEvents} />
+            {/* Panel 3: empty skeleton while streaming */}
+            <div className="flex items-center justify-center rounded-xl border border-slate-200 bg-white p-6 shadow-sm">
+              <LoadingIndicator label="Awaiting trial result…" />
+            </div>
+          </div>
+        </div>
+      );
+    }
+
     return (
       <div className={shellClass} data-testid="dashboard">
         <div className="p-6">
@@ -354,7 +511,14 @@ export function Dashboard({ caseId }: DashboardProps) {
           subject={packet.subject}
           documents={packet.documents}
         />
-        <AgentTransparencyTree casePacket={packet} />
+        <AgentTransparencyTree
+          casePacket={packet}
+          agentDebate={
+            USE_LIVE_BACKEND && streamEvents.length > 0
+              ? streamEvents
+              : undefined
+          }
+        />
         <AdjudicationConsole
           {...adjudicationConsolePropsFromPacket(packet)}
           onSubmitDecisionAsync={handleSubmitDecision}

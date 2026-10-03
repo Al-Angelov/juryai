@@ -15,10 +15,20 @@ from datetime import datetime, timezone
 ROOT_DIR = Path(__file__).parent
 load_dotenv(ROOT_DIR / '.env')
 
-# MongoDB connection
-mongo_url = os.environ['MONGO_URL']
-client = AsyncIOMotorClient(mongo_url)
-db = client[os.environ['DB_NAME']]
+# MongoDB connection with graceful fallback
+mongo_url = os.environ.get('MONGO_URL')
+db_name = os.environ.get('DB_NAME', 'juryai_db')
+
+db = None
+if mongo_url:
+    try:
+        client = AsyncIOMotorClient(mongo_url)
+        db = client[db_name]
+        print(f"Connected to MongoDB database: {db_name}")
+    except Exception as e:
+        print(f"Warning: Failed to connect to MongoDB ({e}). Running without DB persistence.")
+else:
+    print("Notice: MONGO_URL not set in environment. Running backend in stateless/in-memory mode.")
 
 # Create the main app without a prefix
 app = FastAPI()
@@ -43,16 +53,27 @@ class StatusCheckCreate(BaseModel):
 async def root():
     return {"message": "Hello World"}
 
+# Temporary in-memory fallback store
+in_memory_status_checks = []
+
+
 @api_router.post("/status", response_model=StatusCheck)
 async def create_status_check(input: StatusCheckCreate):
     status_dict = input.model_dump()
     status_obj = StatusCheck(**status_dict)
-    
-    # Convert to dict and serialize datetime to ISO string for MongoDB
     doc = status_obj.model_dump()
-    doc['timestamp'] = doc['timestamp'].isoformat()
-    
-    _ = await db.status_checks.insert_one(doc)
+    doc["timestamp"] = doc["timestamp"].isoformat()
+
+    # Check if MongoDB is available before inserting
+    if db is not None:
+        try:
+            await db.status_checks.insert_one(doc)
+        except Exception as e:
+            print(f"Failed to write status check to MongoDB: {e}")
+            in_memory_status_checks.append(doc)
+    else:
+        in_memory_status_checks.append(doc)
+
     return status_obj
 
 @api_router.get("/status", response_model=List[StatusCheck])
